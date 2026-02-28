@@ -1368,7 +1368,7 @@ with st.container(border=True):
     if "input_url" not in st.session_state:
         st.session_state["input_url"] = "https://s.keibabook.co.jp/cyuou/nouryoku_html_detail/202601040703.html"
         
-    base_url_input = st.text_input("🔗 競馬ブックの出馬表URLを貼り付け", value=st.session_state["input_url"], key="input_url")
+    base_url_input = st.text_input("🔗 競馬ブックの出馬表URLを貼り付け", key="input_url")
     
     st.markdown("**🎯 予想したいレースを選択（複数可）**")
     if "races_sel" not in st.session_state:
@@ -1420,7 +1420,6 @@ if run_inference:
         st.warning("レース番号を選択してください。")
         run_inference = False
     else:
-        st.session_state["input_url"] = base_url_input
         target_races = selected_races
         match = re.search(r'\d{10,12}', base_url_input)
         base_race_id = match.group()[:10] if match else ""
