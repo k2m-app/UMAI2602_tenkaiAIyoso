@@ -1555,11 +1555,19 @@ if run_inference:
                         result_area.markdown(ai_output + "▌")
                     
                     horse_evals = parse_dify_evaluation(ai_output)
-                    battle_matrix_text = fetch_yahoo_matrix_data(
+                    
+                    matrix_html = ""
+                    battle_matrix_raw = fetch_yahoo_matrix_data(
                         driver, year_str, place_str, kai_str, day_str, f"{race_num:02d}", 
                         str(current_dist), 
                         horse_evals=horse_evals
                     )
+                    
+                    if isinstance(battle_matrix_raw, tuple):
+                        battle_matrix_text = battle_matrix_raw[0]
+                        matrix_html = battle_matrix_raw[1]
+                    else:
+                        battle_matrix_text = battle_matrix_raw
     
                 final_output = ai_output + "\n\n" + battle_matrix_text
                 result_area.markdown(final_output)
