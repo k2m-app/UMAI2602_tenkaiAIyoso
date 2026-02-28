@@ -7,8 +7,32 @@ import time
 import re
 import traceback
 import json
+import os
 import math
 import streamlit.components.v1 as components
+
+CACHE_DIR = "race_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+def load_race_cache(race_id, mode):
+    cache_file = os.path.join(CACHE_DIR, f"{race_id}_{mode}.json")
+    if os.path.exists(cache_file):
+        if time.time() - os.path.getmtime(cache_file) < 3600:
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except:
+                pass
+    return None
+
+def save_race_cache(race_id, mode, data):
+    cache_file = os.path.join(CACHE_DIR, f"{race_id}_{mode}.json")
+    try:
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("Cache save error:", e)
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -1038,7 +1062,7 @@ def fetch_netkeiba_data(driver, year, kai, place, day, race_num):
 # ==================================================
 # Yahooスポーツナビ 対戦表取得ロジック（★評価ランク対応版）
 # ==================================================
-def fetch_yahoo_matrix_data(driver, year, place, kai, day, race_num, current_distance_str, horse_evals=None):
+def fetch_yahoo_matrix_data(driver, year, place, kai, day, race_num, current_distance_str, horse_evals=None, current_venue=""):
     nk_place = KEIBABOOK_TO_NETKEIBA_PLACE.get(place, "")
     if not nk_place: return "場所コードエラー"
     y_year, y_id = year[-2:], f"{year[-2:]}{nk_place}{kai.zfill(2)}{day.zfill(2)}{race_num.zfill(2)}"
@@ -1073,11 +1097,31 @@ def fetch_yahoo_matrix_data(driver, year, place, kai, day, race_num, current_dis
     current_dist_int = extract_distance_int(current_distance_str)
     output_lines_plain = ["\n【対戦表】"]
     output_lines_html = ["<div style='margin-bottom: 20px;'><h4 style='color: #4b5563; border-bottom: 2px solid #e5e7eb; padding-bottom: 5px;'>⚔️ 対戦表</h4>"]
+    nk_codes_to_names = {
+        "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
+        "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
+    }
+    left_venues = ["東京", "中京", "新潟"]
+    right_venues = ["中山", "阪神", "京都", "札幌", "函館", "福島", "小倉"]
+
     for battle in valid_battles:
         info = battle["info"]
         results = battle["results"]
         results.sort(key=lambda r: int(re.sub(r"\D", "", r["rank"])) if re.sub(r"\D", "", r["rank"]) else 999)
         diff = extract_distance_int(info["dist_str"]) - current_dist_int
+        
+        info_place_code = info['id'][2:4] if len(info['id']) >= 4 else ""
+        venue_name = nk_codes_to_names.get(info_place_code, "")
+        
+        venue_style = ""
+        if current_venue and venue_name == current_venue:
+            venue_style = "color: #EF4444; font-weight: bold;"
+        elif current_venue:
+            if (current_venue in left_venues and venue_name in left_venues) or (current_venue in right_venues and venue_name in right_venues):
+                venue_style = "font-weight: bold; color: #111827;"
+            
+        styled_dist_str = f"<span style='{venue_style}'>{venue_name}</span>{info['dist_str']}"
+        plain_dist_str = f"{venue_name}{info['dist_str']}"
         
         res_str_list = []
         res_html_list = []
@@ -1102,7 +1146,7 @@ def fetch_yahoo_matrix_data(driver, year, place, kai, day, race_num, current_dis
         
         # Plain text
         output_lines_plain.extend([
-            f"・{info['date'].replace(' ', '')} {info['name']} {info['dist_str']}({diff:+}m)", 
+            f"・{info['date'].replace(' ', '')} {info['name']} {plain_dist_str}({diff:+}m)", 
             f"URL：{url}", 
             "着順：" + "　".join(res_str_list), 
             ""
@@ -1110,9 +1154,9 @@ def fetch_yahoo_matrix_data(driver, year, place, kai, day, race_num, current_dis
         
         # HTML 
         output_lines_html.append(f"<div style='background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px; margin-bottom: 10px;'>")
-        output_lines_html.append(f"<div style='font-weight: bold; margin-bottom: 4px;'>{info['date'].replace(' ', '')} {info['name']} {info['dist_str']}({diff:+}m)</div>")
+        output_lines_html.append(f"<div style='font-weight: bold; margin-bottom: 4px; color: #4b5563;'>{info['date'].replace(' ', '')} {info['name']} {styled_dist_str}({diff:+}m)</div>")
         output_lines_html.append(f"<div style='margin-bottom: 6px;'><a href='{url}' target='_blank' style='color: #3b82f6; text-decoration: none;'>📄 レース結果を見る</a></div>")
-        output_lines_html.append(f"<div style='font-size: 0.9em;'><strong>着順：</strong>{'　'.join(res_html_list)}</div>")
+        output_lines_html.append(f"<div style='font-size: 0.9em; color: #374151;'><strong>着順：</strong>{'　'.join(res_html_list)}</div>")
         output_lines_html.append("</div>")
 
     output_lines_html.append("</div>")
@@ -1411,170 +1455,231 @@ if run_inference:
             
             st.markdown(f"## 🏁 {race_num}R")
             
-            with st.spinner(f"{race_num}R のデータ収集中..."):
-                # --- [1] app.py側のデータ取得 (requests版) ---
-                horses, current_dist, current_venue, current_track, error_msg = fetch_real_data(target_race_id)
-                if error_msg:
-                    st.warning(f"{error_msg}")
-                    continue
-                    
-                total_horses = len(horses)
+            cached_data = load_race_cache(target_race_id, run_mode)
+            if cached_data:
+                st.success("⚡ 1時間以内のキャッシュから瞬時に読み込みました！")
+                current_dist = cached_data.get("current_dist", "")
+                current_venue = cached_data.get("current_venue", "")
+                current_track = cached_data.get("current_track", "")
+                race_title = cached_data.get("race_title", "")
+                total_horses = cached_data.get("total_horses", 0)
+                sorted_horses = cached_data.get("sorted_horses", [])
+                formation_text = cached_data.get("formation_text", "")
+                pace_comment = cached_data.get("pace_comment", "")
+                horse_evals = cached_data.get("horse_evals", {})
+                html_ai_output = cached_data.get("html_ai_output", "")
+                final_output = cached_data.get("final_output", "")
+                battle_matrix_text = cached_data.get("battle_matrix_text", "")
+                matrix_html = cached_data.get("matrix_html", "")
                 
-                # --- [2] ability_prediction側のデータ取得 (Selenium版) ---
-                header_info, danwa_data = fetch_keibabook_danwa(driver, target_race_id)
-                race_title = header_info.get("header_text", "")
-                is_shinba = any(x in race_title for x in ["新馬", "メイクデビュー"])
+                st.info(f"📏 条件: **{current_venue} {current_track}{current_dist}m** ({total_horses}頭立て)  \n" + race_title)
                 
-                cpu_data, speed_metrics, interview_data, chokyo_data, nk_data = {}, {}, {}, {}, {}
-                year_str = target_race_id[:4]
-                kai_str = target_race_id[4:6]
-                place_str = target_race_id[6:8]
-                day_str = target_race_id[8:10]
-
+                if run_mode in ("both", "tenkai"):
+                    st.markdown(f"<h4 style='text-align: center; letter-spacing: 2px;'>◀(進行方向)</h4>", unsafe_allow_html=True)
+                    st.markdown(f"<h3 style='text-align: center; color: #FF4B4B;'>{formation_text}</h3>", unsafe_allow_html=True)
+                    st.markdown("---")
+                    st.write(pace_comment)
+                    with st.expander(f"📊 {race_num}R の展開データ・ポジションスコア"):
+                        df_rows = []
+                        for h in sorted_horses:
+                            past = h.get('past_races', [])
+                            zenso = str(past[-1]['first_corner_pos']) if len(past) >= 1 and 'first_corner_pos' in past[-1] else "-"
+                            ni_so = str(past[-2]['first_corner_pos']) if len(past) >= 2 and 'first_corner_pos' in past[-2] else "-"
+                            san_so = str(past[-3]['first_corner_pos']) if len(past) >= 3 and 'first_corner_pos' in past[-3] else "-"
+                            df_rows.append({
+                                "馬番": h['horse_number'], "馬名": h['horse_name'], "スコア": round(h.get('score', 0), 2),
+                                "戦法": h.get('running_style', ''), "前走1角": zenso, "2走前1角": ni_so, "3走前1角": san_so, "特記事項": h.get('special_flag', '')
+                            })
+                        if df_rows:
+                            st.dataframe(pd.DataFrame(df_rows), use_container_width=True, hide_index=True)
+                
                 if run_mode in ("both", "ai"):
-                    cpu_data = fetch_keibabook_cpu_data(driver, target_race_id, is_shinba=is_shinba)
-                    speed_metrics = compute_speed_metrics(cpu_data)
-                    interview_data = fetch_zenkoso_interview(driver, target_race_id)
-                    chokyo_data = fetch_keibabook_chokyo(driver, target_race_id)
-                    nk_data = fetch_netkeiba_data(driver, year_str, kai_str, place_str, day_str, f"{race_num:02d}")
-                
-                # --- [3] 展開スコア計算 & 厩舎話微調整 ---
-                for horse in horses:
-                    # 基本スコア計算
-                    horse['score'] = calculate_pace_score(horse, current_dist, current_venue, current_track, total_horses)
-                    
-                    # 厩舎話による微調整
-                    umaban_str = str(horse['horse_number'])
-                    if danwa_data and umaban_str in danwa_data:
-                        danwa_text = danwa_data[umaban_str].get('danwa', '')
-                        score, special_flag, running_style = adjust_score_by_danwa(
-                            danwa_text, 
-                            horse['score'], 
-                            horse.get('special_flag', ''), 
-                            horse.get('running_style', '')
-                        )
-                        horse['score'] = score
-                        horse['special_flag'] = special_flag
-                        horse['running_style'] = running_style
+                    st.markdown(f"### 🤖 AI総合評価 ({race_num}R)")
+                    st.markdown(final_output)
 
-                horses = apply_give_up_synergy(horses, current_venue, current_dist, current_track)
-                sorted_horses = sorted(horses, key=lambda x: x['score'])
-                formation_text = format_formation(sorted_horses)
-                pace_comment = generate_pace_and_spread_comment(sorted_horses, current_track)
-
-            # --- [4] 展開予想の表示 (app.py) ---
-            st.info(f"📏 条件: **{current_venue} {current_track}{current_dist}m** ({total_horses}頭立て)  \n" + race_title)
-            
-            if run_mode in ("both", "tenkai"):
-                # 展開パネル
-                st.markdown(f"<h4 style='text-align: center; letter-spacing: 2px;'>◀(進行方向)</h4>", unsafe_allow_html=True)
-                st.markdown(f"<h3 style='text-align: center; color: #FF4B4B;'>{formation_text}</h3>", unsafe_allow_html=True)
-                st.markdown("---")
-                st.write(pace_comment)
-                
-                with st.expander(f"📊 {race_num}R の展開データ・ポジションスコア"):
-                    df_rows = []
-                    for h in sorted_horses:
-                        past = h.get('past_races', [])
-                        zenso = str(past[-1]['first_corner_pos']) if len(past) >= 1 and 'first_corner_pos' in past[-1] else "-"
-                        ni_so = str(past[-2]['first_corner_pos']) if len(past) >= 2 and 'first_corner_pos' in past[-2] else "-"
-                        san_so = str(past[-3]['first_corner_pos']) if len(past) >= 3 and 'first_corner_pos' in past[-3] else "-"
+            if not cached_data:
+                with st.spinner(f"{race_num}R のデータ収集中..."):
+                    # --- [1] app.py側のデータ取得 (requests版) ---
+                    horses, current_dist, current_venue, current_track, error_msg = fetch_real_data(target_race_id)
+                    if error_msg:
+                        st.warning(f"{error_msg}")
+                        continue
                         
-                        df_rows.append({
-                            "馬番": h['horse_number'],
-                            "馬名": h['horse_name'],
-                            "スコア": round(h['score'], 2),
-                            "戦法": h.get('running_style', ''),
-                            "前走1角": zenso,
-                            "2走前1角": ni_so,
-                            "3走前1角": san_so,
-                            "特記事項": h.get('special_flag', '')
+                    total_horses = len(horses)
+                    
+                    # --- [2] ability_prediction側のデータ取得 (Selenium版) ---
+                    header_info, danwa_data = fetch_keibabook_danwa(driver, target_race_id)
+                    race_title = header_info.get("header_text", "")
+                    is_shinba = any(x in race_title for x in ["新馬", "メイクデビュー"])
+                    
+                    cpu_data, speed_metrics, interview_data, chokyo_data, nk_data = {}, {}, {}, {}, {}
+                    year_str = target_race_id[:4]
+                    kai_str = target_race_id[4:6]
+                    place_str = target_race_id[6:8]
+                    day_str = target_race_id[8:10]
+    
+                    if run_mode in ("both", "ai"):
+                        cpu_data = fetch_keibabook_cpu_data(driver, target_race_id, is_shinba=is_shinba)
+                        speed_metrics = compute_speed_metrics(cpu_data)
+                        interview_data = fetch_zenkoso_interview(driver, target_race_id)
+                        chokyo_data = fetch_keibabook_chokyo(driver, target_race_id)
+                        nk_data = fetch_netkeiba_data(driver, year_str, kai_str, place_str, day_str, f"{race_num:02d}")
+                    
+                    # --- [3] 展開スコア計算 & 厩舎話微調整 ---
+                    for horse in horses:
+                        # 基本スコア計算
+                        horse['score'] = calculate_pace_score(horse, current_dist, current_venue, current_track, total_horses)
+                        
+                        # 厩舎話による微調整
+                        umaban_str = str(horse['horse_number'])
+                        if danwa_data and umaban_str in danwa_data:
+                            danwa_text = danwa_data[umaban_str].get('danwa', '')
+                            score, special_flag, running_style = adjust_score_by_danwa(
+                                danwa_text, 
+                                horse['score'], 
+                                horse.get('special_flag', ''), 
+                                horse.get('running_style', '')
+                            )
+                            horse['score'] = score
+                            horse['special_flag'] = special_flag
+                            horse['running_style'] = running_style
+    
+                    horses = apply_give_up_synergy(horses, current_venue, current_dist, current_track)
+                    sorted_horses = sorted(horses, key=lambda x: x['score'])
+                    formation_text = format_formation(sorted_horses)
+                    pace_comment = generate_pace_and_spread_comment(sorted_horses, current_track)
+    
+                # --- [4] 展開予想の表示 (app.py) ---
+                st.info(f"📏 条件: **{current_venue} {current_track}{current_dist}m** ({total_horses}頭立て)  \n" + race_title)
+                
+                if run_mode in ("both", "tenkai"):
+                    # 展開パネル
+                    st.markdown(f"<h4 style='text-align: center; letter-spacing: 2px;'>◀(進行方向)</h4>", unsafe_allow_html=True)
+                    st.markdown(f"<h3 style='text-align: center; color: #FF4B4B;'>{formation_text}</h3>", unsafe_allow_html=True)
+                    st.markdown("---")
+                    st.write(pace_comment)
+                    
+                    with st.expander(f"📊 {race_num}R の展開データ・ポジションスコア"):
+                        df_rows = []
+                        for h in sorted_horses:
+                            past = h.get('past_races', [])
+                            zenso = str(past[-1]['first_corner_pos']) if len(past) >= 1 and 'first_corner_pos' in past[-1] else "-"
+                            ni_so = str(past[-2]['first_corner_pos']) if len(past) >= 2 and 'first_corner_pos' in past[-2] else "-"
+                            san_so = str(past[-3]['first_corner_pos']) if len(past) >= 3 and 'first_corner_pos' in past[-3] else "-"
+                            
+                            df_rows.append({
+                                "馬番": h['horse_number'],
+                                "馬名": h['horse_name'],
+                                "スコア": round(h['score'], 2),
+                                "戦法": h.get('running_style', ''),
+                                "前走1角": zenso,
+                                "2走前1角": ni_so,
+                                "3走前1角": san_so,
+                                "特記事項": h.get('special_flag', '')
+                            })
+                        st.dataframe(pd.DataFrame(df_rows), use_container_width=True, hide_index=True)
+                
+                horse_evals = {}
+                html_ai_output = ""
+                final_output = ""
+                
+                if run_mode in ("both", "ai"):
+                    # --- [5] 能力予想 & Dify実行 (ability_prediction.py) ---
+                    st.markdown(f"### 🤖 AI総合評価 ({race_num}R)")
+                    
+                    # Dify用プロンプトのコンパイル
+                    lines = []
+                    for horse in sorted_horses:
+                        umaban = horse['horse_number']
+                        umaban_str = str(umaban)
+                        
+                        # 展開スコアや特記事項を能力データと結合する
+                        d = danwa_data.get(umaban_str, {"waku": "?", "name": horse['horse_name'], "danwa": "なし"})
+                        sm = speed_metrics.get(umaban_str, {})
+                        n = nk_data.get(umaban_str, {})
+                        c = cpu_data.get(umaban_str, {})
+                        k = chokyo_data.get(umaban_str, {"tanpyo": "-", "details": "-"})
+                        
+                        bias = calculate_baba_bias(int(d["waku"]) if isinstance(d["waku"], str) and d["waku"].isdigit() else 0, race_title)
+                        
+                        sp_val = sm.get("speed_index", "-")
+                        sp_str = f"スピード指数:{sp_val}/35点"
+                        kinsou_idx = n.get("kinsou_index", 0.0)
+                        fac_str = f"F:{c.get('fac_deashi','-')}/{c.get('fac_kettou','-')}" if is_shinba else f"F:{c.get('fac_crs','-')}/{c.get('fac_dis','-')}"
+                        
+                        current_jockey = n.get('jockey', '-')
+                        prev_jockey = n.get('prev_jockey', None)
+                        
+                        def is_same_jockey(prev_full, curr_abbr):
+                            if not prev_full or not curr_abbr: return False
+                            p = prev_full.replace(" ", "").replace("　", "")
+                            c = curr_abbr.replace(" ", "").replace("　", "")
+                            if p == c: return True
+                            if len(c) > 0 and p.startswith(c): return True
+                            return False
+        
+                        jockey_disp = f"騎手:{current_jockey}←{prev_jockey}" if (prev_jockey and not is_same_jockey(prev_jockey, current_jockey)) else f"騎手:{current_jockey}"
+                        
+                        line = (
+                            f"▼{d['waku']}枠{umaban}番 {d['name']} ({jockey_disp})\n"
+                            f"【データ】{sp_str} バイアス:{bias['total']} 近走指数:{kinsou_idx:.1f} {fac_str}\n"
+                            f"【厩舎】{d.get('danwa', '')}\n"
+                            f"【前走】{interview_data.get(umaban_str, 'なし')}\n"
+                            f"【調教】{k.get('tanpyo', '')} \n{k.get('details', '')}\n"
+                            f"【近走】{' / '.join(n.get('past', []))}\n"
+                        )
+                        lines.append(line)
+        
+                    # レース情報と各馬詳細のみ（展開予想に関する見解はAIへ渡さない）
+                    raw_data_block = f"■レース情報\n{race_title}\n\n■各馬詳細\n" + "\n".join(lines)
+                    
+                    result_area = st.empty()
+                    ai_output = ""
+                    
+                    with st.spinner("Dify AIプロンプト分析中..."):
+                        for chunk in stream_dify_workflow(raw_data_block):
+                            ai_output += chunk
+                            result_area.markdown(ai_output + "▌")
+                        
+                        horse_evals = parse_dify_evaluation(ai_output)
+                        
+                        matrix_html = ""
+                        battle_matrix_raw = fetch_yahoo_matrix_data(
+                            driver, year_str, place_str, kai_str, day_str, f"{race_num:02d}", 
+                            str(current_dist), 
+                            horse_evals=horse_evals, current_venue=current_venue
+                        )
+                        
+                        if isinstance(battle_matrix_raw, tuple):
+                            battle_matrix_text = battle_matrix_raw[0]
+                            matrix_html = battle_matrix_raw[1]
+                        else:
+                            battle_matrix_text = battle_matrix_raw
+                            matrix_html = ""
+        
+                    final_output = ai_output
+                    result_area.markdown(final_output)
+                    
+                    import html
+                    html_ai_output = format_dify_md_to_html(final_output)
+                    
+                    if not cached_data:
+                        save_race_cache(target_race_id, run_mode, {
+                            "current_dist": current_dist,
+                            "current_venue": current_venue,
+                            "current_track": current_track,
+                            "race_title": race_title,
+                            "total_horses": total_horses,
+                            "sorted_horses": sorted_horses,
+                            "formation_text": formation_text,
+                            "pace_comment": pace_comment,
+                            "horse_evals": horse_evals,
+                            "html_ai_output": html_ai_output,
+                            "final_output": final_output,
+                            "battle_matrix_text": battle_matrix_text,
+                            "matrix_html": matrix_html
                         })
-                    st.dataframe(pd.DataFrame(df_rows), use_container_width=True, hide_index=True)
-            
-            horse_evals = {}
-            html_ai_output = ""
-            final_output = ""
-            
-            if run_mode in ("both", "ai"):
-                # --- [5] 能力予想 & Dify実行 (ability_prediction.py) ---
-                st.markdown(f"### 🤖 AI総合評価 ({race_num}R)")
-                
-                # Dify用プロンプトのコンパイル
-                lines = []
-                for horse in sorted_horses:
-                    umaban = horse['horse_number']
-                    umaban_str = str(umaban)
                     
-                    # 展開スコアや特記事項を能力データと結合する
-                    d = danwa_data.get(umaban_str, {"waku": "?", "name": horse['horse_name'], "danwa": "なし"})
-                    sm = speed_metrics.get(umaban_str, {})
-                    n = nk_data.get(umaban_str, {})
-                    c = cpu_data.get(umaban_str, {})
-                    k = chokyo_data.get(umaban_str, {"tanpyo": "-", "details": "-"})
-                    
-                    bias = calculate_baba_bias(int(d["waku"]) if isinstance(d["waku"], str) and d["waku"].isdigit() else 0, race_title)
-                    
-                    sp_val = sm.get("speed_index", "-")
-                    sp_str = f"スピード指数:{sp_val}/35点"
-                    kinsou_idx = n.get("kinsou_index", 0.0)
-                    fac_str = f"F:{c.get('fac_deashi','-')}/{c.get('fac_kettou','-')}" if is_shinba else f"F:{c.get('fac_crs','-')}/{c.get('fac_dis','-')}"
-                    
-                    current_jockey = n.get('jockey', '-')
-                    prev_jockey = n.get('prev_jockey', None)
-                    
-                    def is_same_jockey(prev_full, curr_abbr):
-                        if not prev_full or not curr_abbr: return False
-                        p = prev_full.replace(" ", "").replace("　", "")
-                        c = curr_abbr.replace(" ", "").replace("　", "")
-                        if p == c: return True
-                        if len(c) > 0 and p.startswith(c): return True
-                        return False
-    
-                    jockey_disp = f"騎手:{current_jockey}←{prev_jockey}" if (prev_jockey and not is_same_jockey(prev_jockey, current_jockey)) else f"騎手:{current_jockey}"
-                    
-                    line = (
-                        f"▼{d['waku']}枠{umaban}番 {d['name']} ({jockey_disp})\n"
-                        f"【データ】{sp_str} バイアス:{bias['total']} 近走指数:{kinsou_idx:.1f} {fac_str}\n"
-                        f"【厩舎】{d.get('danwa', '')}\n"
-                        f"【前走】{interview_data.get(umaban_str, 'なし')}\n"
-                        f"【調教】{k.get('tanpyo', '')} \n{k.get('details', '')}\n"
-                        f"【近走】{' / '.join(n.get('past', []))}\n"
-                    )
-                    lines.append(line)
-    
-                # レース情報と各馬詳細のみ（展開予想に関する見解はAIへ渡さない）
-                raw_data_block = f"■レース情報\n{race_title}\n\n■各馬詳細\n" + "\n".join(lines)
-                
-                result_area = st.empty()
-                ai_output = ""
-                
-                with st.spinner("Dify AIプロンプト分析中..."):
-                    for chunk in stream_dify_workflow(raw_data_block):
-                        ai_output += chunk
-                        result_area.markdown(ai_output + "▌")
-                    
-                    horse_evals = parse_dify_evaluation(ai_output)
-                    
-                    matrix_html = ""
-                    battle_matrix_raw = fetch_yahoo_matrix_data(
-                        driver, year_str, place_str, kai_str, day_str, f"{race_num:02d}", 
-                        str(current_dist), 
-                        horse_evals=horse_evals
-                    )
-                    
-                    if isinstance(battle_matrix_raw, tuple):
-                        battle_matrix_text = battle_matrix_raw[0]
-                        matrix_html = battle_matrix_raw[1]
-                    else:
-                        battle_matrix_text = battle_matrix_raw
-    
-                final_output = ai_output + "\n\n" + battle_matrix_text
-                result_area.markdown(final_output)
-                
-                import html
-                html_ai_output = format_dify_md_to_html(final_output)
-                
             log_parts = [f"\n【{race_num}R】 {race_title}"]
             if run_mode in ("both", "tenkai"):
                 log_parts.append(f"■展開予想\n{formation_text}\n{pace_comment}")
