@@ -519,6 +519,14 @@ def generate_pace_and_spread_comment(sorted_horses, current_track):
     leaders = [h for h in sorted_horses if h['score'] <= top_score + 1.2][:3]
     leader_nums = "、".join([chr(9311 + h['horse_number']) for h in leaders])
     
+    # Runaway risk check: Is the 1st horse significantly far ahead of the 2nd?
+    second_score = sorted_horses[1]['score']
+    runaway_gap = second_score - top_score
+    runaway_warning = ""
+    if runaway_gap >= 1.5:
+        runaway_horse_num = chr(9311 + sorted_horses[0]['horse_number'])
+        runaway_warning = f"\n\n🚨 **逃げ残り注意**\n{runaway_horse_num}が単騎で思い切って逃げた場合、後続を引き離したままそのまま押し切るリスクがあります。"
+    
     mid_idx = min(len(sorted_horses)-1, int(len(sorted_horses) * 0.6))
     spread_gap = sorted_horses[mid_idx]['score'] - top_score
     
@@ -551,9 +559,12 @@ def generate_pace_and_spread_comment(sorted_horses, current_track):
     elif avg_top_speed < slow_pace_threshold:
         base_cmt = f"🐢 スローペース想定\n全体的にテンのダッシュ力が控えめで、{leader_nums}が楽に主導権を握る展開。後続は折り合い重視になりそうです。"
     else:
-        base_cmt = f"🐎 平均ペース想定\n{leader_nums}が並んで先行しますが、無理のない標準的なペース配分になりそうです。"
+        if spread_gap >= 5.0:
+            base_cmt = f"🏃 前が引っ張るペース想定\n前に行く{leader_nums}と後続との間に差が開きやすく、平均よりやや締まった展開になりそうです。"
+        else:
+            base_cmt = f"🐎 平均ペース想定\n{leader_nums}が並んで先行しますが、無理のない標準的なペース配分になりそうです。"
 
-    final_cmt = f"**{spread_text}**\n{spread_reason}\n\n**{base_cmt}**"
+    final_cmt = f"**{spread_text}**\n{spread_reason}\n\n**{base_cmt}**{runaway_warning}"
     return final_cmt
 
 
@@ -566,6 +577,17 @@ def adjust_score_by_danwa(danwa: str, horse_score: float, horse_flag: str, runni
         
     danwa_check = danwa.replace(" ", "").replace("　", "")
     
+    # Extract context snippet from original text
+    def get_context(match_word: str, text: str, pre=8, post=15):
+        idx = text.find(match_word)
+        if idx == -1: return ""
+        start = max(0, idx - pre)
+        end = min(len(text), idx + len(match_word) + post)
+        snippet = text[start:end]
+        if start > 0: snippet = "…" + snippet
+        if end < len(text): snippet = snippet + "…"
+        return snippet.replace("\n", "").replace("\r", "")
+
     # 前方への意図
     front_intent = ["ハナ", "逃げ", "前へ", "先行", "前進気勢", "前につけ", "積極的に", "主導権", "外目に付けて", "外目につけて"]
     # 後方への意図
@@ -590,12 +612,16 @@ def adjust_score_by_danwa(danwa: str, horse_score: float, horse_flag: str, runni
     else:
         if front_match and not back_match:
             horse_score -= 1.0
-            horse_flag = (horse_flag + f" 🗣️厩舎:[{front_match[0]}]").strip()
+            word = front_match[0]
+            ctx = get_context(word, danwa)
+            horse_flag = (horse_flag + f" 🗣️厩舎:[{word}]「{ctx}」").strip()
             if running_style != "ハナ絶対" and ("ハナ" in front_match or "逃げ" in front_match):
                 running_style = "ハナ絶対"
         elif back_match:
             horse_score += 1.0
-            horse_flag = (horse_flag + f" 🗣️厩舎:[{back_match[0]}]控").strip()
+            word = back_match[0]
+            ctx = get_context(word, danwa)
+            horse_flag = (horse_flag + f" 🗣️厩舎:[{word}]控「{ctx}」").strip()
             if running_style == "ハナ絶対" and ("控える" in back_match or "番手" in back_match):
                 running_style = "先行（控える）"
             
@@ -1383,14 +1409,24 @@ if run_inference:
                 st.write(pace_comment)
                 
                 with st.expander(f"📊 {race_num}R の展開データ・ポジションスコア"):
-                    df_result = pd.DataFrame([{
-                        "馬番": h['horse_number'],
-                        "馬名": h['horse_name'],
-                        "スコア": round(h['score'], 2),
-                        "戦法": h.get('running_style', ''),
-                        "特記事項": h.get('special_flag', '')
-                    } for h in sorted_horses])
-                    st.dataframe(df_result, use_container_width=True, hide_index=True)
+                    df_rows = []
+                    for h in sorted_horses:
+                        past = h.get('past_races', [])
+                        zenso = str(past[-1]['first_corner_pos']) if len(past) >= 1 and 'first_corner_pos' in past[-1] else "-"
+                        ni_so = str(past[-2]['first_corner_pos']) if len(past) >= 2 and 'first_corner_pos' in past[-2] else "-"
+                        san_so = str(past[-3]['first_corner_pos']) if len(past) >= 3 and 'first_corner_pos' in past[-3] else "-"
+                        
+                        df_rows.append({
+                            "馬番": h['horse_number'],
+                            "馬名": h['horse_name'],
+                            "スコア": round(h['score'], 2),
+                            "戦法": h.get('running_style', ''),
+                            "前走1角": zenso,
+                            "2走前1角": ni_so,
+                            "3走前1角": san_so,
+                            "特記事項": h.get('special_flag', '')
+                        })
+                    st.dataframe(pd.DataFrame(df_rows), use_container_width=True, hide_index=True)
             
             horse_evals = {}
             html_ai_output = ""
@@ -1493,11 +1529,15 @@ if run_inference:
             
             details_html = ""
             if run_mode in ("both", "tenkai"):
-                details_html = "<details><summary style='cursor: pointer; font-weight: bold; color: #4F46E5;'>📊 展開予測の詳細を開く</summary><table style='width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px;'>"
-                details_html += "<tr style='background-color: #f0f2f6; border-bottom: 2px solid #d1d5db;'><th>馬番</th><th>馬名</th><th>スコア</th><th>戦法</th></tr>"
+                details_html = "<details><summary style='cursor: pointer; font-weight: bold; color: #4F46E5;'>📊 展開予測の詳細を開く</summary><div style='overflow-x: auto;'><table style='width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; white-space: nowrap;'>"
+                details_html += "<tr style='background-color: #f0f2f6; border-bottom: 2px solid #d1d5db;'><th>馬番</th><th>馬名</th><th>スコア</th><th>戦法</th><th>前走1角</th><th>2走前1角</th><th>3走前1角</th></tr>"
                 for h in sorted_horses:
-                    details_html += f"<tr style='border-bottom: 1px solid #e5e7eb;'><td style='text-align:center;'>{h['horse_number']}</td><td>{h['horse_name']}</td><td style='text-align:center;'>{round(h['score'], 2)}</td><td style='text-align:center;'>{h.get('running_style', '')}</td></tr>"
-                details_html += "</table></details>"
+                    past = h.get('past_races', [])
+                    zenso = str(past[-1]['first_corner_pos']) if len(past) >= 1 and 'first_corner_pos' in past[-1] else "-"
+                    ni_so = str(past[-2]['first_corner_pos']) if len(past) >= 2 and 'first_corner_pos' in past[-2] else "-"
+                    san_so = str(past[-3]['first_corner_pos']) if len(past) >= 3 and 'first_corner_pos' in past[-3] else "-"
+                    details_html += f"<tr style='border-bottom: 1px solid #e5e7eb;'><td style='text-align:center;'>{h['horse_number']}</td><td>{h['horse_name']}</td><td style='text-align:center;'>{round(h['score'], 2)}</td><td style='text-align:center;'>{h.get('running_style', '')}</td><td style='text-align:center;'>{zenso}</td><td style='text-align:center;'>{ni_so}</td><td style='text-align:center;'>{san_so}</td></tr>"
+                details_html += "</table></div></details>"
 
             eval_html = ""
             if run_mode in ("both", "ai"):
