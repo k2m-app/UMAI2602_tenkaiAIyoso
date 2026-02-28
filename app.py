@@ -166,7 +166,14 @@ def format_dify_md_to_html(md_text: str) -> str:
         # Table
         if stripped.startswith('|'):
             if not in_table:
-                html_lines.append("<div style='overflow-x: auto; margin: 15px 0 25px 0;'><table style='width: 100%; border-collapse: collapse; font-size: 0.9em; box-shadow: 0 1px 3px rgba(0,0,0,0.05); min-width: 400px;'>")
+                # Add sorting buttons before the table
+                html_lines.append("""
+                <div style='margin: 15px 0 5px 0; text-align: right;'>
+                    <button onclick='sortAiTable(0)' style='margin-right: 5px; padding: 4px 8px; font-size: 0.8em; border: 1px solid #cbd5e1; border-radius: 4px; background: #fff; cursor: pointer; color: #475569;'>↕️ 馬番で並び替え</button>
+                    <button onclick='sortAiTable(2)' style='padding: 4px 8px; font-size: 0.8em; border: 1px solid #cbd5e1; border-radius: 4px; background: #fff; cursor: pointer; color: #475569;'>↕️ 評価順で並び替え</button>
+                </div>
+                """)
+                html_lines.append("<div style='overflow-x: auto; margin: 0 0 25px 0;'><table id='ai-eval-table' style='width: 100%; border-collapse: collapse; font-size: 0.9em; box-shadow: 0 1px 3px rgba(0,0,0,0.05); min-width: 400px;'>")
                 in_table = True
             
             if '|---' in stripped or '|:-' in stripped:
@@ -185,7 +192,15 @@ def format_dify_md_to_html(md_text: str) -> str:
             for i, cell in enumerate(cells):
                 cell = safe_html(cell)
                 cell = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', cell)
+                
+                # Extract clean rank for data attribute before adding span tags
+                raw_rank = cell
                 if i == 2: # 評価列
+                    if re.match(r'^[SABCDEFGH]$', raw_rank) or re.match(r'^<strong>[SABCDEFGH]</strong>$', raw_rank):
+                        raw_rank = raw_rank.replace('<strong>', '').replace('</strong>', '')
+                    else:
+                        raw_rank = "Z" # Fallback for sorting
+                        
                     cell = re.sub(r'<strong>([SABCDEFGH])</strong>', repl_rank, cell)
                     cell = re.sub(r'^([SABCDEFGH])$', repl_rank, cell)
                     
@@ -193,15 +208,28 @@ def format_dify_md_to_html(md_text: str) -> str:
                 
                 if is_th:
                     style = "padding: 12px 10px; text-align: left; color: #334155; font-weight: bold; white-space: nowrap;"
+                    html_lines.append(f"<{tag} style='{style}'>{cell}</{tag}>")
                 else:
                     style = "padding: 10px; color: #475569; vertical-align: middle;"
+                    if i in [0, 2]:
+                        style += " text-align: center;"
+                    if i == 3:
+                        style += " text-align: left;"
                     
-                if i in [0, 2]:
-                    style += " text-align: center;"
-                if i == 3:
-                    style += " text-align: left;"
-                
-                html_lines.append(f"<{tag} style='{style}'>{cell}</{tag}>")
+                    # Add data attributes to cells for easier sorting
+                    attr = ""
+                    if i == 0: # Uma-ban
+                        try:
+                            num = int(re.sub(r'\D', '', cell))
+                            attr = f" data-sort-val='{num}'"
+                        except:
+                            attr = " data-sort-val='999'"
+                    elif i == 2: # Rank
+                        rank_order = {"S": 1, "A": 2, "B": 3, "C": 4, "D": 5, "E": 6, "F": 7, "G": 8, "H": 9}
+                        order = rank_order.get(raw_rank, 99)
+                        attr = f" data-sort-val='{order}'"
+                        
+                    html_lines.append(f"<{tag} style='{style}'{attr}>{cell}</{tag}>")
             html_lines.append("</tr>")
             continue
         else:
@@ -1042,18 +1070,54 @@ def fetch_yahoo_matrix_data(driver, year, place, kai, day, race_num, current_dis
             matrix_data[rid]["results"].append({"name": horse_name, "rank": rank})
     valid_battles = sorted([d for d in matrix_data.values() if len(d["results"]) >= 2], key=lambda x: x["info"]["id"], reverse=True)
     if not valid_battles: return "対戦データなし（該当レースなし）"
-    current_dist_int, output_lines = extract_distance_int(current_distance_str), ["\n【対戦表】"]
+    current_dist_int = extract_distance_int(current_distance_str)
+    output_lines_plain = ["\n【対戦表】"]
+    output_lines_html = ["<div style='margin-bottom: 20px;'><h4 style='color: #4b5563; border-bottom: 2px solid #e5e7eb; padding-bottom: 5px;'>⚔️ 対戦表</h4>"]
     for battle in valid_battles:
-        info, results = battle["info"], battle["results"]
+        info = battle["info"]
+        results = battle["results"]
         results.sort(key=lambda r: int(re.sub(r"\D", "", r["rank"])) if re.sub(r"\D", "", r["rank"]) else 999)
         diff = extract_distance_int(info["dist_str"]) - current_dist_int
+        
         res_str_list = []
+        res_html_list = []
         for r in results:
             grade = horse_evals.get(r['name'], "") if horse_evals else ""
-            suffix = f"({grade})" if grade else ""
-            res_str_list.append(f"{r['rank']}着{r['name']}{suffix}")
-        output_lines.extend([f"・{info['date'].replace(' ', '')} {info['name']} {info['dist_str']}({diff:+}m)", f"URL：https://race.netkeiba.com/race/result.html?race_id=20{info['id']}", "着順：" + "　".join(res_str_list), ""])
-    return "\n".join(output_lines)
+            
+            # Plain text part
+            suffix_plain = f"({grade})" if grade else ""
+            res_str_list.append(f"{r['rank']}着{r['name']}{suffix_plain}")
+            
+            # HTML part (color coding grade)
+            if grade == "S": g_color = "#FFD700"
+            elif grade == "A": g_color = "#FF69B4"
+            elif grade == "B": g_color = "#FF0000"
+            elif grade == "C": g_color = "#FFA500"
+            else: g_color = "#6b7280"
+            
+            suffix_html = f"(<span style='color:{g_color};font-weight:bold;'>{grade}</span>)" if grade else ""
+            res_html_list.append(f"{r['rank']}着{r['name']}{suffix_html}")
+            
+        url = f"https://race.netkeiba.com/race/result.html?race_id=20{info['id']}"
+        
+        # Plain text
+        output_lines_plain.extend([
+            f"・{info['date'].replace(' ', '')} {info['name']} {info['dist_str']}({diff:+}m)", 
+            f"URL：{url}", 
+            "着順：" + "　".join(res_str_list), 
+            ""
+        ])
+        
+        # HTML 
+        output_lines_html.append(f"<div style='background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px; margin-bottom: 10px;'>")
+        output_lines_html.append(f"<div style='font-weight: bold; margin-bottom: 4px;'>{info['date'].replace(' ', '')} {info['name']} {info['dist_str']}({diff:+}m)</div>")
+        output_lines_html.append(f"<div style='margin-bottom: 6px;'><a href='{url}' target='_blank' style='color: #3b82f6; text-decoration: none;'>📄 レース結果を見る</a></div>")
+        output_lines_html.append(f"<div style='font-size: 0.9em;'><strong>着順：</strong>{'　'.join(res_html_list)}</div>")
+        output_lines_html.append("</div>")
+
+    output_lines_html.append("</div>")
+    
+    return "\n".join(output_lines_plain), "".join(output_lines_html)
 
 # ==================================================
 # Dify Streaming
@@ -1529,14 +1593,15 @@ if run_inference:
             
             details_html = ""
             if run_mode in ("both", "tenkai"):
-                details_html = "<details><summary style='cursor: pointer; font-weight: bold; color: #4F46E5;'>📊 展開予測の詳細を開く</summary><div style='overflow-x: auto;'><table style='width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; white-space: nowrap;'>"
-                details_html += "<tr style='background-color: #f0f2f6; border-bottom: 2px solid #d1d5db;'><th>馬番</th><th>馬名</th><th>スコア</th><th>戦法</th><th>前走1角</th><th>2走前1角</th><th>3走前1角</th></tr>"
+                details_html = "<details><summary style='cursor: pointer; font-weight: bold; color: #4F46E5;'>📊 展開予測の詳細を開く</summary><div style='overflow-x: auto; padding-bottom: 10px;'><table style='width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; white-space: nowrap;'>"
+                details_html += "<tr style='background-color: #f0f2f6; border-bottom: 2px solid #d1d5db;'><th>馬番</th><th>馬名</th><th>スコア</th><th>戦法</th><th>前走1角</th><th>2走前1角</th><th>3走前1角</th><th style='min-width: 200px;'>特記事項</th></tr>"
                 for h in sorted_horses:
                     past = h.get('past_races', [])
                     zenso = str(past[-1]['first_corner_pos']) if len(past) >= 1 and 'first_corner_pos' in past[-1] else "-"
                     ni_so = str(past[-2]['first_corner_pos']) if len(past) >= 2 and 'first_corner_pos' in past[-2] else "-"
                     san_so = str(past[-3]['first_corner_pos']) if len(past) >= 3 and 'first_corner_pos' in past[-3] else "-"
-                    details_html += f"<tr style='border-bottom: 1px solid #e5e7eb;'><td style='text-align:center;'>{h['horse_number']}</td><td>{h['horse_name']}</td><td style='text-align:center;'>{round(h['score'], 2)}</td><td style='text-align:center;'>{h.get('running_style', '')}</td><td style='text-align:center;'>{zenso}</td><td style='text-align:center;'>{ni_so}</td><td style='text-align:center;'>{san_so}</td></tr>"
+                    flag = h.get('special_flag', '')
+                    details_html += f"<tr style='border-bottom: 1px solid #e5e7eb;'><td style='text-align:center;'>{h['horse_number']}</td><td>{h['horse_name']}</td><td style='text-align:center;'>{round(h['score'], 2)}</td><td style='text-align:center;'>{h.get('running_style', '')}</td><td style='text-align:center;'>{zenso}</td><td style='text-align:center;'>{ni_so}</td><td style='text-align:center;'>{san_so}</td><td style='white-space: normal; font-size: 0.9em; color: #d97706;'>{flag}</td></tr>"
                 details_html += "</table></div></details>"
 
             eval_html = ""
@@ -1577,6 +1642,8 @@ if run_inference:
                 
             if run_mode in ("both", "ai"):
                 race_html_parts.append(eval_html)
+                if matrix_html:
+                    race_html_parts.append(matrix_html)
                 race_html_parts.append(f"""
                   <details style='margin-top: 15px;'><summary style='cursor: pointer; font-weight: bold; color: #4F46E5; background-color: #e0e7ff; padding: 10px; border-radius: 6px;'>📝 AI見解詳細を読む（タップで開閉）</summary>
                     <div style='font-family: inherit; font-size: 13px; color: #374151; background: #ffffff; border: 1px solid #e5e7eb; padding: 12px; border-radius: 0 0 6px 6px; border-top: none;'>
@@ -1606,6 +1673,35 @@ if run_inference:
             {full_html_tabs_content}
         </div>
         <script>
+        // Sort AI Table
+        function sortAiTable(colIdx) {{
+            var table = document.getElementById("ai-eval-table");
+            if (!table) return;
+            var tbody = table.querySelector("tbody") || table;
+            var rows = Array.from(tbody.querySelectorAll("tr")).slice(1);
+            
+            var currentDir = table.getAttribute("data-sort-dir-" + colIdx);
+            var isAsc = currentDir !== "asc";
+            table.setAttribute("data-sort-dir-" + colIdx, isAsc ? "asc" : "desc");
+
+            rows.sort(function(a, b) {{
+                var cellA = a.children[colIdx];
+                var cellB = b.children[colIdx];
+                if (!cellA || !cellB) return 0;
+                
+                var valA = parseInt(cellA.getAttribute("data-sort-val") || "999");
+                var valB = parseInt(cellB.getAttribute("data-sort-val") || "999");
+                
+                return isAsc ? (valA - valB) : (valB - valA);
+            }});
+
+            rows.forEach(function(row) {{ tbody.appendChild(row); }});
+            
+            rows.forEach(function(row, idx) {{
+                row.style.backgroundColor = (idx % 2 === 0) ? "#ffffff" : "#f8fafc";
+            }});
+        }}
+
         function umaiOpenTab(evt, raceId) {{
             var i, tabcontent, tablinks;
             tabcontent = document.getElementsByClassName("umai-tabcontent");
@@ -1644,8 +1740,16 @@ if run_inference:
         with tab2:
             st.markdown("### HTMLプレビュー")
             components.html(full_html_log, height=800, scrolling=True)
-            st.text_area("ソースコード", full_html_log, height=300)
-            render_copy_button(full_html_log, "HTMLソースをコピー", "html_copy_all")
+            
+            # RAW HTML TEXT AREA IS REMOVED. Added download button instead.
+            st.download_button(
+                label="📥 HTMLファイルをダウンロードする",
+                data=full_html_log,
+                file_name="race_prediction.html",
+                mime="text/html",
+                use_container_width=True,
+                type="primary"
+            )
 
 if __name__ == '__main__':
     pass
