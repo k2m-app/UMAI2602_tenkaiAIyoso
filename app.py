@@ -1364,7 +1364,11 @@ with st.container(border=True):
     st.subheader("⚙️ レース設定")
     
     st.markdown("[🔗 競馬ブックはこちら](https://s.keibabook.co.jp/cyuou/top)")
-    base_url_input = st.text_input("🔗 競馬ブックの出馬表URLを貼り付け", value="https://s.keibabook.co.jp/cyuou/nouryoku_html_detail/202601040703.html")
+    
+    if "input_url" not in st.session_state:
+        st.session_state["input_url"] = "https://s.keibabook.co.jp/cyuou/nouryoku_html_detail/202601040703.html"
+        
+    base_url_input = st.text_input("🔗 競馬ブックの出馬表URLを貼り付け", value=st.session_state["input_url"], key="input_url")
     
     st.markdown("**🎯 予想したいレースを選択（複数可）**")
     if "races_sel" not in st.session_state:
@@ -1416,6 +1420,7 @@ if run_inference:
         st.warning("レース番号を選択してください。")
         run_inference = False
     else:
+        st.session_state["input_url"] = base_url_input
         target_races = selected_races
         match = re.search(r'\d{10,12}', base_url_input)
         base_race_id = match.group()[:10] if match else ""
@@ -1845,24 +1850,27 @@ if run_inference:
         </script>
         """
 
-        st.markdown("## 📋 一括出力結果")
-        tab1, tab2 = st.tabs(["📝 プレーンテキスト", "🌐 ブログ用HTML"])
-        with tab1:
-            st.text_area("コピペ用テキスト", full_output_log, height=300)
-            render_copy_button(full_output_log, "全文コピー", "txt_copy_all")
-        with tab2:
-            st.markdown("### HTMLプレビュー")
-            components.html(full_html_log, height=800, scrolling=True)
-            
-            # RAW HTML TEXT AREA IS REMOVED. Added download button instead.
-            st.download_button(
-                label="📥 HTMLファイルをダウンロードする",
-                data=full_html_log,
-                file_name="race_prediction.html",
-                mime="text/html",
-                use_container_width=True,
-                type="primary"
-            )
+        st.session_state["full_output_log"] = full_output_log
+        st.session_state["full_html_log"] = full_html_log
+
+if "full_html_log" in st.session_state and st.session_state["full_html_log"]:
+    st.markdown("## 📋 一括出力結果")
+    tab1, tab2 = st.tabs(["📝 プレーンテキスト", "🌐 ブログ用HTML"])
+    with tab1:
+        st.text_area("コピペ用テキスト", st.session_state["full_output_log"], height=300)
+        render_copy_button(st.session_state["full_output_log"], "全文コピー", "txt_copy_all")
+    with tab2:
+        st.markdown("### HTMLプレビュー")
+        components.html(st.session_state["full_html_log"], height=800, scrolling=True)
+        
+        st.download_button(
+            label="📥 HTMLファイルをダウンロードする",
+            data=st.session_state["full_html_log"],
+            file_name="race_prediction.html",
+            mime="text/html",
+            use_container_width=True,
+            type="primary"
+        )
 
 if __name__ == '__main__':
     pass
