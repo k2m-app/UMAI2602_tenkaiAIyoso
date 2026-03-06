@@ -1400,36 +1400,42 @@ with st.container(border=True):
         execute_ai_btn = st.button("🤖AI予想のみ", type="secondary", use_container_width=True)
 
 # 実行トリガーの判定
-run_inference = False
-run_mode = "both"
-target_races = []
-base_race_id = ""
+if "run_inference" not in st.session_state:
+    st.session_state["run_inference"] = False
+    st.session_state["run_mode"] = "both"
+    st.session_state["target_races"] = []
+    st.session_state["base_race_id"] = ""
 
 if execute_both_btn:
-    run_inference = True
-    run_mode = "both"
+    st.session_state["run_inference"] = True
+    st.session_state["run_mode"] = "both"
 elif execute_tenkai_btn:
-    run_inference = True
-    run_mode = "tenkai"
+    st.session_state["run_inference"] = True
+    st.session_state["run_mode"] = "tenkai"
 elif execute_ai_btn:
-    run_inference = True
-    run_mode = "ai"
+    st.session_state["run_inference"] = True
+    st.session_state["run_mode"] = "ai"
 
-if run_inference:
+if st.session_state["run_inference"]:
     if not selected_races:
         st.warning("レース番号を選択してください。")
-        run_inference = False
+        st.session_state["run_inference"] = False
     else:
-        target_races = selected_races
+        st.session_state["target_races"] = selected_races
         match = re.search(r'\d{10,12}', base_url_input)
-        base_race_id = match.group()[:10] if match else ""
+        st.session_state["base_race_id"] = match.group()[:10] if match else ""
 
 # ==========================================
 # 推論・描画の実行
 # ==========================================
-if run_inference:
+if st.session_state["run_inference"]:
+    base_race_id = st.session_state["base_race_id"]
+    target_races = st.session_state["target_races"]
+    run_mode = st.session_state["run_mode"]
+
     if not base_race_id:
         st.error("有効な競馬ブックのレースIDが見つかりません。")
+        st.session_state["run_inference"] = False
     else:
         # Selenium Driver 起動
         driver = None
@@ -1502,188 +1508,194 @@ if run_inference:
                     st.markdown(final_output)
 
             if not cached_data:
-                with st.spinner(f"{race_num}R のデータ収集中..."):
-                    # --- [1] app.py側のデータ取得 (requests版) ---
-                    horses, current_dist, current_venue, current_track, error_msg = fetch_real_data(target_race_id)
-                    if error_msg:
-                        st.warning(f"{error_msg}")
-                        continue
+                try:
+                    with st.spinner(f"{race_num}R のデータ収集中..."):
+                        # --- [1] app.py側のデータ取得 (requests版) ---
+                        horses, current_dist, current_venue, current_track, error_msg = fetch_real_data(target_race_id)
+                        if error_msg:
+                            st.warning(f"{error_msg}")
+                            continue
                         
-                    total_horses = len(horses)
+                        total_horses = len(horses)
                     
-                    # --- [2] ability_prediction側のデータ取得 (Selenium版) ---
-                    header_info, danwa_data = fetch_keibabook_danwa(driver, target_race_id)
-                    race_title = header_info.get("header_text", "")
-                    is_shinba = any(x in race_title for x in ["新馬", "メイクデビュー"])
+                        # --- [2] ability_prediction側のデータ取得 (Selenium版) ---
+                        header_info, danwa_data = fetch_keibabook_danwa(driver, target_race_id)
+                        race_title = header_info.get("header_text", "")
+                        is_shinba = any(x in race_title for x in ["新馬", "メイクデビュー"])
                     
-                    cpu_data, speed_metrics, interview_data, chokyo_data, nk_data = {}, {}, {}, {}, {}
-                    year_str = target_race_id[:4]
-                    kai_str = target_race_id[4:6]
-                    place_str = target_race_id[6:8]
-                    day_str = target_race_id[8:10]
+                        cpu_data, speed_metrics, interview_data, chokyo_data, nk_data = {}, {}, {}, {}, {}
+                        year_str = target_race_id[:4]
+                        kai_str = target_race_id[4:6]
+                        place_str = target_race_id[6:8]
+                        day_str = target_race_id[8:10]
     
-                    if run_mode in ("both", "ai"):
-                        cpu_data = fetch_keibabook_cpu_data(driver, target_race_id, is_shinba=is_shinba)
-                        speed_metrics = compute_speed_metrics(cpu_data)
-                        interview_data = fetch_zenkoso_interview(driver, target_race_id)
-                        chokyo_data = fetch_keibabook_chokyo(driver, target_race_id)
-                        nk_data = fetch_netkeiba_data(driver, year_str, kai_str, place_str, day_str, f"{race_num:02d}")
+                        if run_mode in ("both", "ai"):
+                            cpu_data = fetch_keibabook_cpu_data(driver, target_race_id, is_shinba=is_shinba)
+                            speed_metrics = compute_speed_metrics(cpu_data)
+                            interview_data = fetch_zenkoso_interview(driver, target_race_id)
+                            chokyo_data = fetch_keibabook_chokyo(driver, target_race_id)
+                            nk_data = fetch_netkeiba_data(driver, year_str, kai_str, place_str, day_str, f"{race_num:02d}")
                     
-                    # --- [3] 展開スコア計算 & 厩舎話微調整 ---
-                    for horse in horses:
-                        # 基本スコア計算
-                        horse['score'] = calculate_pace_score(horse, current_dist, current_venue, current_track, total_horses)
+                        # --- [3] 展開スコア計算 & 厩舎話微調整 ---
+                        for horse in horses:
+                            # 基本スコア計算
+                            horse['score'] = calculate_pace_score(horse, current_dist, current_venue, current_track, total_horses)
                         
-                        # 厩舎話による微調整
-                        umaban_str = str(horse['horse_number'])
-                        if danwa_data and umaban_str in danwa_data:
-                            danwa_text = danwa_data[umaban_str].get('danwa', '')
-                            score, special_flag, running_style = adjust_score_by_danwa(
-                                danwa_text, 
-                                horse['score'], 
-                                horse.get('special_flag', ''), 
-                                horse.get('running_style', '')
-                            )
-                            horse['score'] = score
-                            horse['special_flag'] = special_flag
-                            horse['running_style'] = running_style
+                            # 厩舎話による微調整
+                            umaban_str = str(horse['horse_number'])
+                            if danwa_data and umaban_str in danwa_data:
+                                danwa_text = danwa_data[umaban_str].get('danwa', '')
+                                score, special_flag, running_style = adjust_score_by_danwa(
+                                    danwa_text, 
+                                    horse['score'], 
+                                    horse.get('special_flag', ''), 
+                                    horse.get('running_style', '')
+                                )
+                                horse['score'] = score
+                                horse['special_flag'] = special_flag
+                                horse['running_style'] = running_style
     
-                    horses = apply_give_up_synergy(horses, current_venue, current_dist, current_track)
-                    sorted_horses = sorted(horses, key=lambda x: x['score'])
-                    formation_text = format_formation(sorted_horses)
-                    pace_comment = generate_pace_and_spread_comment(sorted_horses, current_track)
+                        horses = apply_give_up_synergy(horses, current_venue, current_dist, current_track)
+                        sorted_horses = sorted(horses, key=lambda x: x['score'])
+                        formation_text = format_formation(sorted_horses)
+                        pace_comment = generate_pace_and_spread_comment(sorted_horses, current_track)
     
-                # --- [4] 展開予想の表示 (app.py) ---
-                st.info(f"📏 条件: **{current_venue} {current_track}{current_dist}m** ({total_horses}頭立て)  \n" + race_title)
+                    # --- [4] 展開予想の表示 (app.py) ---
+                    st.info(f"📏 条件: **{current_venue} {current_track}{current_dist}m** ({total_horses}頭立て)  \n" + race_title)
                 
-                if run_mode in ("both", "tenkai"):
-                    # 展開パネル
-                    st.markdown(f"<h4 style='text-align: center; letter-spacing: 2px;'>◀(進行方向)</h4>", unsafe_allow_html=True)
-                    st.markdown(f"<h3 style='text-align: center; color: #FF4B4B;'>{formation_text}</h3>", unsafe_allow_html=True)
-                    st.markdown("---")
-                    st.write(pace_comment)
+                    if run_mode in ("both", "tenkai"):
+                        # 展開パネル
+                        st.markdown(f"<h4 style='text-align: center; letter-spacing: 2px;'>◀(進行方向)</h4>", unsafe_allow_html=True)
+                        st.markdown(f"<h3 style='text-align: center; color: #FF4B4B;'>{formation_text}</h3>", unsafe_allow_html=True)
+                        st.markdown("---")
+                        st.write(pace_comment)
                     
-                    with st.expander(f"📊 {race_num}R の展開データ・ポジションスコア"):
-                        df_rows = []
-                        for h in sorted_horses:
-                            past = h.get('past_races', [])
-                            zenso = str(past[-1]['first_corner_pos']) if len(past) >= 1 and 'first_corner_pos' in past[-1] else "-"
-                            ni_so = str(past[-2]['first_corner_pos']) if len(past) >= 2 and 'first_corner_pos' in past[-2] else "-"
-                            san_so = str(past[-3]['first_corner_pos']) if len(past) >= 3 and 'first_corner_pos' in past[-3] else "-"
+                        with st.expander(f"📊 {race_num}R の展開データ・ポジションスコア"):
+                            df_rows = []
+                            for h in sorted_horses:
+                                past = h.get('past_races', [])
+                                zenso = str(past[-1]['first_corner_pos']) if len(past) >= 1 and 'first_corner_pos' in past[-1] else "-"
+                                ni_so = str(past[-2]['first_corner_pos']) if len(past) >= 2 and 'first_corner_pos' in past[-2] else "-"
+                                san_so = str(past[-3]['first_corner_pos']) if len(past) >= 3 and 'first_corner_pos' in past[-3] else "-"
                             
-                            df_rows.append({
-                                "馬番": h['horse_number'],
-                                "馬名": h['horse_name'],
-                                "スコア": round(h['score'], 2),
-                                "戦法": h.get('running_style', ''),
-                                "前走1角": zenso,
-                                "2走前1角": ni_so,
-                                "3走前1角": san_so,
-                                "特記事項": h.get('special_flag', '')
-                            })
-                        st.dataframe(pd.DataFrame(df_rows), use_container_width=True, hide_index=True)
+                                df_rows.append({
+                                    "馬番": h['horse_number'],
+                                    "馬名": h['horse_name'],
+                                    "スコア": round(h['score'], 2),
+                                    "戦法": h.get('running_style', ''),
+                                    "前走1角": zenso,
+                                    "2走前1角": ni_so,
+                                    "3走前1角": san_so,
+                                    "特記事項": h.get('special_flag', '')
+                                })
+                            st.dataframe(pd.DataFrame(df_rows), use_container_width=True, hide_index=True)
                 
-                horse_evals = {}
-                html_ai_output = ""
-                final_output = ""
+                    horse_evals = {}
+                    html_ai_output = ""
+                    final_output = ""
                 
-                if run_mode in ("both", "ai"):
-                    # --- [5] 能力予想 & Dify実行 (ability_prediction.py) ---
-                    st.markdown(f"### 🤖 AI総合評価 ({race_num}R)")
+                    if run_mode in ("both", "ai"):
+                        # --- [5] 能力予想 & Dify実行 (ability_prediction.py) ---
+                        st.markdown(f"### 🤖 AI総合評価 ({race_num}R)")
                     
-                    # Dify用プロンプトのコンパイル
-                    lines = []
-                    for horse in sorted_horses:
-                        umaban = horse['horse_number']
-                        umaban_str = str(umaban)
+                        # Dify用プロンプトのコンパイル
+                        lines = []
+                        for horse in sorted_horses:
+                            umaban = horse['horse_number']
+                            umaban_str = str(umaban)
                         
-                        # 展開スコアや特記事項を能力データと結合する
-                        d = danwa_data.get(umaban_str, {"waku": "?", "name": horse['horse_name'], "danwa": "なし"})
-                        sm = speed_metrics.get(umaban_str, {})
-                        n = nk_data.get(umaban_str, {})
-                        c = cpu_data.get(umaban_str, {})
-                        k = chokyo_data.get(umaban_str, {"tanpyo": "-", "details": "-"})
+                            # 展開スコアや特記事項を能力データと結合する
+                            d = danwa_data.get(umaban_str, {"waku": "?", "name": horse['horse_name'], "danwa": "なし"})
+                            sm = speed_metrics.get(umaban_str, {})
+                            n = nk_data.get(umaban_str, {})
+                            c = cpu_data.get(umaban_str, {})
+                            k = chokyo_data.get(umaban_str, {"tanpyo": "-", "details": "-"})
                         
-                        bias = calculate_baba_bias(int(d["waku"]) if isinstance(d["waku"], str) and d["waku"].isdigit() else 0, race_title)
+                            bias = calculate_baba_bias(int(d["waku"]) if isinstance(d["waku"], str) and d["waku"].isdigit() else 0, race_title)
                         
-                        sp_val = sm.get("speed_index", "-")
-                        sp_str = f"スピード指数:{sp_val}/35点"
-                        kinsou_idx = n.get("kinsou_index", 0.0)
-                        fac_str = f"F:{c.get('fac_deashi','-')}/{c.get('fac_kettou','-')}" if is_shinba else f"F:{c.get('fac_crs','-')}/{c.get('fac_dis','-')}"
+                            sp_val = sm.get("speed_index", "-")
+                            sp_str = f"スピード指数:{sp_val}/35点"
+                            kinsou_idx = n.get("kinsou_index", 0.0)
+                            fac_str = f"F:{c.get('fac_deashi','-')}/{c.get('fac_kettou','-')}" if is_shinba else f"F:{c.get('fac_crs','-')}/{c.get('fac_dis','-')}"
                         
-                        current_jockey = n.get('jockey', '-')
-                        prev_jockey = n.get('prev_jockey', None)
+                            current_jockey = n.get('jockey', '-')
+                            prev_jockey = n.get('prev_jockey', None)
                         
-                        def is_same_jockey(prev_full, curr_abbr):
-                            if not prev_full or not curr_abbr: return False
-                            p = prev_full.replace(" ", "").replace("　", "")
-                            c = curr_abbr.replace(" ", "").replace("　", "")
-                            if p == c: return True
-                            if len(c) > 0 and p.startswith(c): return True
-                            return False
+                            def is_same_jockey(prev_full, curr_abbr):
+                                if not prev_full or not curr_abbr: return False
+                                p = prev_full.replace(" ", "").replace("　", "")
+                                c = curr_abbr.replace(" ", "").replace("　", "")
+                                if p == c: return True
+                                if len(c) > 0 and p.startswith(c): return True
+                                return False
         
-                        jockey_disp = f"騎手:{current_jockey}←{prev_jockey}" if (prev_jockey and not is_same_jockey(prev_jockey, current_jockey)) else f"騎手:{current_jockey}"
+                            jockey_disp = f"騎手:{current_jockey}←{prev_jockey}" if (prev_jockey and not is_same_jockey(prev_jockey, current_jockey)) else f"騎手:{current_jockey}"
                         
-                        line = (
-                            f"▼{d['waku']}枠{umaban}番 {d['name']} ({jockey_disp})\n"
-                            f"【データ】{sp_str} バイアス:{bias['total']} 近走指数:{kinsou_idx:.1f} {fac_str}\n"
-                            f"【厩舎】{d.get('danwa', '')}\n"
-                            f"【前走】{interview_data.get(umaban_str, 'なし')}\n"
-                            f"【調教】{k.get('tanpyo', '')} \n{k.get('details', '')}\n"
-                            f"【近走】{' / '.join(n.get('past', []))}\n"
-                        )
-                        lines.append(line)
+                            line = (
+                                f"▼{d['waku']}枠{umaban}番 {d['name']} ({jockey_disp})\n"
+                                f"【データ】{sp_str} バイアス:{bias['total']} 近走指数:{kinsou_idx:.1f} {fac_str}\n"
+                                f"【厩舎】{d.get('danwa', '')}\n"
+                                f"【前走】{interview_data.get(umaban_str, 'なし')}\n"
+                                f"【調教】{k.get('tanpyo', '')} \n{k.get('details', '')}\n"
+                                f"【近走】{' / '.join(n.get('past', []))}\n"
+                            )
+                            lines.append(line)
         
-                    # レース情報と各馬詳細のみ（展開予想に関する見解はAIへ渡さない）
-                    raw_data_block = f"■レース情報\n{race_title}\n\n■各馬詳細\n" + "\n".join(lines)
+                        # レース情報と各馬詳細のみ（展開予想に関する見解はAIへ渡さない）
+                        raw_data_block = f"■レース情報\n{race_title}\n\n■各馬詳細\n" + "\n".join(lines)
                     
-                    result_area = st.empty()
-                    ai_output = ""
+                        result_area = st.empty()
+                        ai_output = ""
                     
-                    with st.spinner("Dify AIプロンプト分析中..."):
-                        for chunk in stream_dify_workflow(raw_data_block):
-                            ai_output += chunk
-                            result_area.markdown(ai_output + "▌")
+                        with st.spinner("Dify AIプロンプト分析中..."):
+                            for chunk in stream_dify_workflow(raw_data_block):
+                                ai_output += chunk
+                                result_area.markdown(ai_output + "▌")
                         
-                        horse_evals = parse_dify_evaluation(ai_output)
+                            horse_evals = parse_dify_evaluation(ai_output)
                         
-                        matrix_html = ""
-                        battle_matrix_raw = fetch_yahoo_matrix_data(
-                            driver, year_str, place_str, kai_str, day_str, f"{race_num:02d}", 
-                            str(current_dist), 
-                            horse_evals=horse_evals, current_venue=current_venue
-                        )
-                        
-                        if isinstance(battle_matrix_raw, tuple):
-                            battle_matrix_text = battle_matrix_raw[0]
-                            matrix_html = battle_matrix_raw[1]
-                        else:
-                            battle_matrix_text = battle_matrix_raw
                             matrix_html = ""
+                            battle_matrix_raw = fetch_yahoo_matrix_data(
+                                driver, year_str, place_str, kai_str, day_str, f"{race_num:02d}", 
+                                str(current_dist), 
+                                horse_evals=horse_evals, current_venue=current_venue
+                            )
+                        
+                            if isinstance(battle_matrix_raw, tuple):
+                                battle_matrix_text = battle_matrix_raw[0]
+                                matrix_html = battle_matrix_raw[1]
+                            else:
+                                battle_matrix_text = battle_matrix_raw
+                                matrix_html = ""
         
-                    final_output = ai_output
-                    result_area.markdown(final_output)
+                        final_output = ai_output
+                        result_area.markdown(final_output)
                     
-                    import html
-                    html_ai_output = format_dify_md_to_html(final_output)
+                        import html
+                        html_ai_output = format_dify_md_to_html(final_output)
                     
-                    if not cached_data:
-                        save_race_cache(target_race_id, run_mode, {
-                            "current_dist": current_dist,
-                            "current_venue": current_venue,
-                            "current_track": current_track,
-                            "race_title": race_title,
-                            "total_horses": total_horses,
-                            "sorted_horses": sorted_horses,
-                            "formation_text": formation_text,
-                            "pace_comment": pace_comment,
-                            "horse_evals": horse_evals,
-                            "html_ai_output": html_ai_output,
-                            "final_output": final_output,
-                            "battle_matrix_text": battle_matrix_text,
-                            "matrix_html": matrix_html
-                        })
+                        if not cached_data:
+                            save_race_cache(target_race_id, run_mode, {
+                                "current_dist": current_dist,
+                                "current_venue": current_venue,
+                                "current_track": current_track,
+                                "race_title": race_title,
+                                "total_horses": total_horses,
+                                "sorted_horses": sorted_horses,
+                                "formation_text": formation_text,
+                                "pace_comment": pace_comment,
+                                "horse_evals": horse_evals,
+                                "html_ai_output": html_ai_output,
+                                "final_output": final_output,
+                                "battle_matrix_text": battle_matrix_text,
+                                "matrix_html": matrix_html
+                            })
                     
+                except Exception as e:
+                    st.error(f'⚠️ {race_num}Rの処理中にエラーが発生しました: {e}')
+                    import traceback
+                    st.code(traceback.format_exc(), language='python')
+                    continue
             log_parts = [f"\n【{race_num}R】 {race_title}"]
             if run_mode in ("both", "tenkai"):
                 log_parts.append(f"■展開予想\n{formation_text}\n{pace_comment}")
@@ -1693,164 +1705,274 @@ if run_inference:
             full_output_log += "\n\n".join(log_parts)
             
             # --- スマホ対応 HTML 生成 ---
-            colored_formation = formation_text
-            if horse_evals:
-                for h_name, grade in horse_evals.items():
-                    h_num = next((h['horse_number'] for h in sorted_horses if h['horse_name'] == h_name), None)
-                    if h_num:
-                        circled_num = chr(9311 + h_num)
-                        g_color = ""
-                        if grade == "S": g_color = "#FFD700"
-                        elif grade == "A": g_color = "#FF69B4"
-                        elif grade == "B": g_color = "#FF0000"
-                        elif grade == "C": g_color = "#FFA500"
-                        
-                        if g_color:
-                            colored_formation = colored_formation.replace(circled_num, f"<span style='color: {g_color}; font-weight: bold;'>{circled_num}</span>")
-            
-            details_html = ""
-            if run_mode in ("both", "tenkai"):
-                details_html = "<details><summary style='cursor: pointer; font-weight: bold; color: #4F46E5;'>📊 展開予測の詳細を開く</summary><div style='overflow-x: auto; padding-bottom: 10px;'><table style='width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; white-space: nowrap;'>"
-                details_html += "<tr style='background-color: #f0f2f6; border-bottom: 2px solid #d1d5db;'><th>馬番</th><th>馬名</th><th>スコア</th><th>戦法</th><th>前走1角</th><th>2走前1角</th><th>3走前1角</th><th style='min-width: 200px;'>特記事項</th></tr>"
-                for h in sorted_horses:
-                    past = h.get('past_races', [])
-                    zenso = str(past[-1]['first_corner_pos']) if len(past) >= 1 and 'first_corner_pos' in past[-1] else "-"
-                    ni_so = str(past[-2]['first_corner_pos']) if len(past) >= 2 and 'first_corner_pos' in past[-2] else "-"
-                    san_so = str(past[-3]['first_corner_pos']) if len(past) >= 3 and 'first_corner_pos' in past[-3] else "-"
-                    flag = h.get('special_flag', '')
-                    details_html += f"<tr style='border-bottom: 1px solid #e5e7eb;'><td style='text-align:center;'>{h['horse_number']}</td><td>{h['horse_name']}</td><td style='text-align:center;'>{round(h['score'], 2)}</td><td style='text-align:center;'>{h.get('running_style', '')}</td><td style='text-align:center;'>{zenso}</td><td style='text-align:center;'>{ni_so}</td><td style='text-align:center;'>{san_so}</td><td style='white-space: normal; font-size: 0.9em; color: #d97706;'>{flag}</td></tr>"
-                details_html += "</table></div></details>"
-
-            eval_html = ""
-            if run_mode in ("both", "ai"):
-                grade_dict = {"S": [], "A": [], "B": [], "C": [], "D": [], "E": [], "F": [], "G": []}
-                if horse_evals:
-                    for n, g in horse_evals.items():
-                        hn = next((h['horse_number'] for h in sorted_horses if h['horse_name'] == n), "")
-                        if g in grade_dict:
-                            grade_dict[g].append(f"{hn}番 {n}")
-                
-                eval_html = "<h4 style='margin-bottom: 10px;'>🏆 AI総合評価</h4>"
-                for g in ["S", "A", "B", "C", "D", "E"]:
-                    if grade_dict[g]:
-                        bcolor = ""
-                        if g == "S": bcolor = "background: linear-gradient(to right, #FFD700, #FFA500); color: white; text-shadow: 0 1px 1px rgba(0,0,0,0.5);"
-                        elif g == "A": bcolor = "background-color: #FF69B4; color: white;"
-                        elif g == "B": bcolor = "background-color: #FF0000; color: white;"
-                        elif g == "C": bcolor = "background-color: #FFA500; color: white;"
-                        else: bcolor = "background-color: #e5e7eb; color: #374151;"
-                        eval_html += f"<div style='margin-bottom: 5px; padding: 4px 8px; border-radius: 4px; {bcolor}'><strong>{g}評価：</strong> {' / '.join(grade_dict[g])}</div>"
-
             import html
-            safe_title = html.escape(race_title.split()[0] if race_title else "")
+            import re
             
-            race_html_parts = [f"<div style='margin-bottom: 30px; font-family: sans-serif;'><h3 style='border-left: 4px solid #FF4B4B; padding-left: 8px;'>🏁 {race_num}R {safe_title}</h3>"]
+            # --- Evaluate Box ---
+            eval_dict = {"S": [], "A": [], "B": [], "C": [], "D": [], "E": [], "F": [], "G": []}
+            if horse_evals:
+                for hn, r in horse_evals.items():
+                    n_num = next((h['horse_number'] for h in sorted_horses if h['horse_name'] == hn), None)
+                    if n_num and r in eval_dict:
+                        eval_dict[r].append(n_num)
             
-            if run_mode in ("both", "tenkai"):
-                safe_pace = html.escape(pace_comment).replace('**', '<b>').replace('🐢', '🐢 ').replace('🔥', '🔥 ')
-                race_html_parts.append(f"""
-                  <div style='background-color: #f9fafb; padding: 12px; border-radius: 8px; margin-bottom: 15px;'>
-                    <p style='text-align: center; margin: 0; color: #6b7280; font-size: 12px;'>◀(進行方向)</p>
-                    <p style='text-align: center; font-size: 20px; margin: 10px 0;'>{colored_formation}</p>
-                    <p style='font-size: 14px; color: #4b5563; margin-top: 10px; white-space: pre-wrap; line-height: 1.5;'>{safe_pace}</p>
-                    {details_html}
-                  </div>
-                """)
+            eval_html_parts = []
+            for r in ["S", "A", "B", "C", "D", "E", "F", "G"]:
+                if eval_dict[r]:
+                    nums = "".join([f"[{x}]" for x in sorted(eval_dict[r])])
+                    eval_html_parts.append(f"<span class='rank-{r}'>{r}</span>{nums}")
+            eval_box_str = "【評価一覧】  " + "  ".join(eval_html_parts) if eval_html_parts else "【評価一覧】  評価なし"
+
+            # --- Pace Text ---
+            pace_text = f"◆ペース予想：{pace_comment}\n◆想定隊列順: {formation_text}\n"
+
+            # --- AI Text ---
+            ai_text_modified = html.escape(final_output) if final_output else ""
+            
+            for h in sorted_horses:
+                num = h['horse_number']
+                name = h['horse_name']
+                rank_str = ""
+                r = horse_evals.get(name)
+                if r: rank_str = f"　<span class='rank-{r}'>{r}</span>"
                 
-            if run_mode in ("both", "ai"):
-                race_html_parts.append(eval_html)
-                if matrix_html:
-                    race_html_parts.append(matrix_html)
-                race_html_parts.append(f"""
-                  <details style='margin-top: 15px;'><summary style='cursor: pointer; font-weight: bold; color: #4F46E5; background-color: #e0e7ff; padding: 10px; border-radius: 6px;'>📝 AI見解詳細を読む（タップで開閉）</summary>
-                    <div style='font-family: inherit; font-size: 13px; color: #374151; background: #ffffff; border: 1px solid #e5e7eb; padding: 12px; border-radius: 0 0 6px 6px; border-top: none;'>
-                       {html_ai_output}
-                    </div>
-                  </details>
-                """)
+                circled_num = chr(9311 + num) if 1 <= num <= 20 else str(num)
+                header_html = f'<div class="horse-header"><span class="mark-btn" data-uma="{num}" data-race="{race_num}" data-mark="" onclick="cycleMark(this)"></span><span>{circled_num}{name}{rank_str}</span></div>'
+                
+                p1 = html.escape(f"{circled_num}{name} {r}" if r else f"{circled_num}{name}")
+                p1b = html.escape(f"{circled_num}{name}　{r}" if r else f"{circled_num}{name}")
+                p2 = html.escape(f"{circled_num}{name}")
+                p3 = html.escape(f"[{num}]{name}")
+                
+                if p1 in ai_text_modified: ai_text_modified = ai_text_modified.replace(p1, header_html)
+                elif p1b in ai_text_modified: ai_text_modified = ai_text_modified.replace(p1b, header_html)
+                elif p2 in ai_text_modified: ai_text_modified = ai_text_modified.replace(p2, header_html)
+                elif p3 in ai_text_modified: ai_text_modified = ai_text_modified.replace(p3, header_html)
+
+            # Re-enable specific tags
+            ai_text_modified = ai_text_modified.replace("【調教】", '<span class="chokyo-label">【調教】</span><div class="chokyo-text">\n')
+            ai_text_modified = re.sub(r"&lt;hr&gt;", "</div>\n<hr>", ai_text_modified)
+            ai_text_modified = re.sub(r"&lt;/?strong(.*?)&gt;", r"<\g<0>>", ai_text_modified)
+
+            # --- Match Text ---
+            safe_matrix = html.escape(battle_matrix_text) if battle_matrix_text else ""
+            for r_char in ["S", "A", "B", "C", "D", "E", "F", "G"]:
+                safe_matrix = safe_matrix.replace(f"({r_char})", f"(<span class='rank-{r_char}'>{r_char}</span>)")
+            safe_matrix = re.sub(r'(https?://[^\s|]+)', r'<a href="\1" target="_blank" rel="noopener" style="color:#2196F3;">\1</a>', safe_matrix)
+
+            active_class = "active" if race_num == target_races[0] else ""
             
-            race_html_parts.append("</div>")
-            race_html = "".join(race_html_parts)
-            full_html_tabs_buttons += f"<button class='umai-tablinks' onclick='umaiOpenTab(event, \"umai-race-{race_num}\")' data-target='umai-race-{race_num}' style='padding: 10px 15px; border: none; background: #e5e7eb; cursor: pointer; border-radius: 4px 4px 0 0; margin-right: 2px; font-weight: bold; color: #374151;'>{race_num}R</button>"
-            full_html_tabs_content += f"<div id='umai-race-{race_num}' class='umai-tabcontent' style='display:none;'>{race_html}</div>"
+            p_map = {"01":"札幌", "02":"函館", "03":"福島", "04":"新潟", "05":"東京", "06":"中山", "07":"中京", "08":"京都", "09":"阪神", "10":"小倉",
+                     "18":"浦和","19":"船橋","20":"大井","21":"川崎","22":"金沢","23":"笠松","24":"名古屋","27":"園田","28":"姫路","31":"高知","32":"佐賀","10":"盛岡","11":"水沢"}
+            
+            place_str = current_venue if current_venue else p_map.get(str(base_race_id)[6:8], "")
+            y_str = base_race_id[:4] if len(base_race_id)>=4 else ""
+            race_header_date_str = f"📅 {y_str}年 {place_str}{race_num}R"
+
+            race_html = f"""
+        <div id="race-{race_num}" class="race-content {active_class}">
+            <div class="race-header-bar">{race_header_date_str}\n{html.escape(race_title)}  {place_str} {current_track}{current_dist}m（外）</div>
+            
+            <div class="inner-tabs">
+                <button class="inner-tab active" onclick="openInnerTab(event, 'race-{race_num}-pace')">展開</button>
+                <button class="inner-tab" onclick="openInnerTab(event, 'race-{race_num}-ai')">AI詳細</button>
+                <button class="inner-tab" onclick="openInnerTab(event, 'race-{race_num}-match')">対戦表</button>
+            </div>
+            
+            <div id="race-{race_num}-pace" class="inner-content active">
+                <div class="content-box">
+                    <div class="eval-box">{eval_box_str}</div>
+                    <pre>【展開予想】\n{pace_text}</pre>
+                </div>
+            </div>
+            
+            <div id="race-{race_num}-ai" class="inner-content">
+                <div class="content-box">
+                    <div class="eval-box" style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px dashed #ccc;">{eval_box_str}</div>
+                    <div style="white-space:pre-wrap;font-size:0.95em;line-height:1.5;">{ai_text_modified}</div>
+                </div>
+            </div>
+            
+            <div id="race-{race_num}-match" class="inner-content">
+                <div class="content-box">
+                    <pre>{safe_matrix}</pre>
+                </div>
+            </div>
+        </div>
+"""
+            full_html_tabs_buttons += f"""<button class="race-tab {active_class}" onclick="openRace(event, 'race-{race_num}')">{race_num}R</button>\n"""
+            full_html_tabs_content += race_html
             
             st.markdown("<br><hr><br>", unsafe_allow_html=True)
 
         if driver:
             driver.quit()
 
-        full_html_log = f"""
-        <style>
-        .umai-tablinks.active {{ background: #4F46E5 !important; color: white !important; }}
-        </style>
-        <div class="umai-tabs-container" style="max-width: 800px; margin: auto;">
-            <div class="umai-tab-header" style="border-bottom: 2px solid #4F46E5; margin-bottom: 20px;">
-                {full_html_tabs_buttons}
-            </div>
-            {full_html_tabs_content}
-        </div>
-        <script>
-        // Sort AI Table
-        function sortAiTable(colIdx) {{
-            var table = document.getElementById("ai-eval-table");
-            if (!table) return;
-            var tbody = table.querySelector("tbody") || table;
-            var rows = Array.from(tbody.querySelectorAll("tr")).slice(1);
-            
-            var currentDir = table.getAttribute("data-sort-dir-" + colIdx);
-            var isAsc = currentDir !== "asc";
-            table.setAttribute("data-sort-dir-" + colIdx, isAsc ? "asc" : "desc");
-
-            rows.sort(function(a, b) {{
-                var cellA = a.children[colIdx];
-                var cellB = b.children[colIdx];
-                if (!cellA || !cellB) return 0;
+        html_title = "AI競馬予想"
+        if len(target_races) > 0:
+            first_race_id = f"{base_race_id}{target_races[0]:02d}"
+            try:
+                place_code = first_race_id[6:8]
+                p_map = {"01":"札幌", "02":"函館", "03":"福島", "04":"新潟", "05":"東京", "06":"中山", "07":"中京", "08":"京都", "09":"阪神", "10":"小倉", "18":"浦和","19":"船橋","20":"大井","21":"川崎","22":"金沢","23":"笠松"}
+                p_name = p_map.get(place_code, "競馬")
+                y_str = first_race_id[:4]
+                html_title = f"📅 {y_str}年 {p_name} 全{len(target_races)}レース予想"
+            except:
+                pass
                 
-                var valA = parseInt(cellA.getAttribute("data-sort-val") || "999");
-                var valB = parseInt(cellB.getAttribute("data-sort-val") || "999");
-                
-                return isAsc ? (valA - valB) : (valB - valA);
-            }});
-
-            rows.forEach(function(row) {{ tbody.appendChild(row); }});
-            
-            rows.forEach(function(row, idx) {{
-                row.style.backgroundColor = (idx % 2 === 0) ? "#ffffff" : "#f8fafc";
-            }});
+        full_html_log = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>{html_title}</title>
+    <style>
+        :root {{
+            --primary: #2c3e50; --bg: #f5f7fa; --box-bg: #fff; --text: #333; --border: #e2e8f0;
+            --s-color: #d4af37; --a-color: #ff69b4; --b-color: #ff4500; --c-color: #ff8c00;
+            --d-color: #ffd700; --e-color: #32cd32; --f-color: #999; --g-color: #ccc;
         }}
-
-        function umaiOpenTab(evt, raceId) {{
-            var i, tabcontent, tablinks;
-            tabcontent = document.getElementsByClassName("umai-tabcontent");
-            for (i = 0; i < tabcontent.length; i++) {{
-                tabcontent[i].style.display = "none";
-            }}
-            tablinks = document.getElementsByClassName("umai-tablinks");
-            for (i = 0; i < tablinks.length; i++) {{
-                tablinks[i].className = tablinks[i].className.replace(" active", "");
-            }}
-            var targetObj = document.getElementById(raceId);
-            if(targetObj) targetObj.style.display = "block";
-            if(evt && evt.currentTarget) evt.currentTarget.className += " active";
-            try {{ localStorage.setItem("umai_active_race_tab", raceId); }} catch(e){{}}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{ font-family: "Hiragino Kaku Gothic ProN","Meiryo",sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }}
+        
+        .main-header {{ background: var(--primary); color: #fff; padding: 12px 15px; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 4px rgba(0,0,0,0.15); }}
+        
+        /* 印ボタン */
+        .horse-header {{
+            font-size: 1.05em;
+            font-weight: bold;
+            color: #1a1a2e;
+            border-left: 4px solid var(--primary);
+            padding-left: 8px;
+            margin-top: 15px;
+            margin-bottom: 5px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }}
+        .mark-btn {{
+            display: inline-block;
+            min-width: 28px;
+            height: 28px;
+            line-height: 28px;
+            text-align: center;
+            border: 2px solid #ccc;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 1.1em;
+            user-select: none;
+            background: #fff;
+            flex-shrink: 0;
+        }}
+        .mark-btn:hover {{ background: #f0f0f0; }}
+        .mark-btn[data-mark='◎'] {{ color: #e74c3c; border-color: #e74c3c; font-weight: bold; }}
+        .mark-btn[data-mark='○'] {{ color: #2196F3; border-color: #2196F3; font-weight: bold; }}
+        .mark-btn[data-mark='▲'] {{ color: #ff9800; border-color: #ff9800; font-weight: bold; }}
+        .mark-btn[data-mark='△'] {{ color: #4caf50; border-color: #4caf50; }}
+        .mark-btn[data-mark='★'] {{ color: #9c27b0; border-color: #9c27b0; }}
+        .mark-btn[data-mark='☆'] {{ color: #795548; border-color: #795548; }}
+        .mark-btn[data-mark='消'] {{ color: #999; border-color: #999; text-decoration: line-through; }}
+        .main-header h2 {{ font-size: 1.1em; }}
+        
+        /* レース番号タブ */
+        .race-tabs {{
+            display: flex; flex-wrap: wrap; gap: 2px; background: #fff; padding: 6px 8px;
+            border-bottom: 2px solid var(--border); position: sticky; top: 48px; z-index: 90;
+        }}
+        .race-tab {{
+            padding: 8px 14px; border: 1px solid var(--border); border-radius: 6px 6px 0 0;
+            background: #f0f0f0; color: #666; font-weight: bold; font-size: 0.95em; cursor: pointer;
+            border-bottom: none;
+        }}
+        .race-tab.active {{ background: var(--primary); color: #fff; border-color: var(--primary); }}
+        
+        .race-content {{ display: none; }}
+        .race-content.active {{ display: block; }}
+        
+        .race-header-bar {{ background: #e8ecf1; padding: 10px 12px; font-weight: bold; font-size: 0.95em; border-bottom: 1px solid var(--border); }}
+        
+        /* 内部タブ(展開/AI/対戦) */
+        .inner-tabs {{ display: flex; background: #fff; border-bottom: 1px solid var(--border); }}
+        .inner-tab {{
+            flex: 1; padding: 10px 5px; border: none; background: none; font-size: 0.9em;
+            font-weight: bold; color: #888; cursor: pointer; border-bottom: 3px solid transparent;
+        }}
+        .inner-tab.active {{ color: var(--primary); border-bottom: 3px solid var(--primary); }}
+        
+        .inner-content {{ display: none; padding: 10px; }}
+        .inner-content.active {{ display: block; }}
+        
+        .content-box {{ background: var(--box-bg); padding: 12px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 10px; overflow-x: auto; }}
+        .eval-box {{ font-size: 1.1em; line-height: 1.6; margin-bottom: 10px; word-break: break-all; }}
+        pre {{ white-space: pre-wrap; font-family: inherit; margin: 0; font-size: 0.95em; }}
+        
+        .rank-S {{ color: var(--s-color); font-weight: bold; font-size: 1.2em; text-shadow: 0 0 1px rgba(0,0,0,0.3); }}
+        .rank-A {{ color: var(--a-color); font-weight: bold; font-size: 1.1em; }}
+        .rank-B {{ color: var(--b-color); font-weight: bold; font-size: 1.1em; }}
+        .rank-C {{ color: var(--c-color); font-weight: bold; font-size: 1.1em; }}
+        .rank-D {{ color: var(--d-color); font-weight: bold; text-shadow: 0 0 1px rgba(0,0,0,0.3); }}
+        .rank-E {{ color: var(--e-color); font-weight: bold; }}
+        .rank-F {{ color: var(--f-color); font-weight: bold; }}
+        .rank-G {{ color: var(--g-color); font-weight: bold; }}
+        
+        .chokyo-label {{ font-size: 0.85em; font-weight: bold; color: #555; }}
+        .chokyo-text {{ font-size: 0.8em; color: #666; background: #f8f9fa; padding: 6px; border-radius: 4px; margin: 3px 0 8px; }}
+        hr {{ border: 0; border-top: 1px dashed var(--border); margin: 15px 0; }}
+        a {{ color: #2196F3; }}
+    </style>
+</head>
+<body>
+    <div class="main-header">
+        <h2>{html_title}</h2>
+    </div>
+    
+    <div class="race-tabs">
+        {full_html_tabs_buttons}
+    </div>
+    
+    {full_html_tabs_content}
 
-        (function() {{
-            var activeTab = null;
-            try {{ activeTab = localStorage.getItem("umai_active_race_tab"); }} catch(e){{}}
-            var tabBtn = document.querySelector('.umai-tablinks[data-target="' + activeTab + '"]');
-            if(tabBtn) {{
-                tabBtn.click();
-            }} else {{
-                var firstBtn = document.querySelector('.umai-tablinks');
-                if(firstBtn) firstBtn.click();
-            }}
-        }})();
-        </script>
-        """
+    <script>
+        function openRace(evt, raceId) {{
+            var tabs = document.getElementsByClassName("race-content");
+            for (var i = 0; i < tabs.length; i++) {{ tabs[i].classList.remove("active"); }}
+            var links = document.getElementsByClassName("race-tab");
+            for (var i = 0; i < links.length; i++) {{ links[i].classList.remove("active"); }}
+            var target = document.getElementById(raceId);
+            if(target) target.classList.add("active");
+            if(evt && evt.currentTarget) evt.currentTarget.classList.add("active");
+            window.scrollTo(0, 0);
+        }}
+        
+        function openInnerTab(evt, tabId) {{
+            var raceContent = evt.currentTarget.closest('.race-content');
+            var contents = raceContent.getElementsByClassName("inner-content");
+            for (var i = 0; i < contents.length; i++) {{ contents[i].classList.remove("active"); }}
+            var links = raceContent.getElementsByClassName("inner-tab");
+            for (var i = 0; i < links.length; i++) {{ links[i].classList.remove("active"); }}
+            var target = document.getElementById(tabId);
+            if(target) target.classList.add("active");
+            if(evt && evt.currentTarget) evt.currentTarget.classList.add("active");
+        }}
+        
+        function cycleMark(btn) {{
+            const marks = ["", "◎", "○", "▲", "△", "★", "☆", "消"];
+            let currentMark = btn.getAttribute("data-mark");
+            let idx = marks.indexOf(currentMark);
+            idx = (idx + 1) % marks.length;
+            btn.setAttribute("data-mark", marks[idx]);
+            btn.innerText = marks[idx];
+        }}
+    </script>
+</body>
+</html>
+"""
 
         st.session_state["full_output_log"] = full_output_log
         st.session_state["full_html_log"] = full_html_log
+        
+        # 実行が完全に終わったらフラグを下ろす
+        st.session_state["run_inference"] = False
 
 if "full_html_log" in st.session_state and st.session_state["full_html_log"]:
     st.markdown("## 📋 一括出力結果")
